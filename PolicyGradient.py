@@ -1,3 +1,10 @@
+'''
+Multi-armed Bandit problem with just one bandit.
+No states present since just one bandit.
+Action -> Reward example
+No state involved.
+'''
+
 import tensorflow as tf
 import numpy as np
 
