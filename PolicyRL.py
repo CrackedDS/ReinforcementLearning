@@ -53,7 +53,7 @@ with tf.Session() as sess:
     total_steps = []
     grad_cumulative = sess.run(agent.training_vars)
     grad_cumulative = [0 for _ in grad_cumulative]
-
+    
     for episode in range(episodes):
         s = env.reset()
         episode_reward = 0
