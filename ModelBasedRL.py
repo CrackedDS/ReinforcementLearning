@@ -1,3 +1,8 @@
+'''
+Cartpole problem.
+Added a model prediction of the environment state, reward, done to switch and use between real episodes and virtual episodes.
+'''
+
 import numpy as np
 import tensorflow as tf
 import gym
