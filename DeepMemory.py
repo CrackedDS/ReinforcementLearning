@@ -12,6 +12,25 @@ import random
 from gridworld import gameEnv
 env = gameEnv(partial=False, size=5)
 
+# The path to save our model to.
+path = "./DeepMemory"
+if not os.path.exists(path):
+    os.makedirs(path)
+
+# Experience Replay
+class experienceBuffer():
+    def __init__(self, buffer_size=50000):
+        self.buffer = []
+        self.buffer_size = buffer_size
+
+    def add(self, experience):
+        if len(self.buffer) + len(experience) >= self.buffer_size:
+            self.buffer[0:len(experience)+len(self.buffer)-self.buffer_size] = []
+        self.buffer.extend(experience)
+
+    def sample(self, size):
+        return np.reshape(np.array(random.sample(self.buffer, size)), [size, 5])
+
 # Q Network Parameters
 q_input_size = 21168
 q_hidden1_size = 32
@@ -67,37 +86,38 @@ class QNetwork():
         self.optimizer = tf.train.AdamOptimizer(learning_rate=lr)
         self.update = self.optimizer.minimize(self.loss)
 
-class experienceBuffer():
-    def __init__(self, buffer_size=50000):
-        self.buffer = []
-        self.buffer_size = buffer_size
+class Agent():
+    def __init__(self, lr, q_input_size, q_hidden1, q_hidden2, q_hidden3, q_hidden4):
+        self.mainQN = QNetwork(lr, q_input_size, q_hidden1, q_hidden2, q_hidden3, q_hidden4)
+        self.targetQN = QNetwork(lr, q_input_size, q_hidden1, q_hidden2, q_hidden3, q_hidden4)
+        self.training_vars = tf.trainable_variables()
+        self.target_ops = self.updateTargetGraph(self.training_vars, tau)
+        self.epsilon = start_epsilon
+        self.step_drop = (start_epsilon - end_epsilon) / annealing_steps
+        self.step_list = []
+        self.reward_list = []
+        self.lifetime_steps = 0
+        self.experience_buffer = experienceBuffer()
 
-    def add(self, experience):
-        if len(self.buffer) + len(experience) >= self.buffer_size:
-            self.buffer[0:len(experience)+len(self.buffer)-self.buffer_size] = []
-        self.buffer.extend(experience)
+    def qInputShaper(self, state):
+        return np.reshape(state, [q_input_size])
 
-    def sample(self, size):
-        return np.reshape(np.array(random.sample(self.buffer, size)), [size, 5])
+    def updateTargetGraph(self, tfVars, tau):
+        total_vars = len(tfVars)
+        op_holder = []
+        for idx,var in enumerate(tfVars[0:total_vars//2]):
+            op_holder.append(tfVars[idx+total_vars//2].assign((var.value()*tau) + ((1-tau)*tfVars[idx+total_vars//2].value())))
+        return op_holder
 
-def qInputShaper(state):
-    return np.reshape(state, [q_input_size])
+    def updateTarget(self, sess, op_holder):
+        for op in op_holder:
+            sess.run(op)
 
-def updateTargetGraph(tfVars,tau):
-    total_vars = len(tfVars)
-    op_holder = []
-    for idx,var in enumerate(tfVars[0:total_vars//2]):
-        op_holder.append(tfVars[idx+total_vars//2].assign((var.value()*tau) + ((1-tau)*tfVars[idx+total_vars//2].value())))
-    return op_holder
-
-def updateTarget(sess, op_holder):
-    for op in op_holder:
-        sess.run(op)
-
-lr = 1e-2
-df = 0.99
-batch_size = 32
-update_freq = 4
+# Training parameters
+lr = 1e-2 # learning rate
+df = 0.99 # discount factor
+batch_size = 32 # Batch processing of the experience buffer
+update_freq = 4 # Frequency to update the Agent Q-Network
 start_epsilon = 1 #Starting chance of random action
 end_epsilon = 0.1 #Final chance of random action
 annealing_steps = 10000. #How many steps of training to reduce start_epsilon to end_epsilon.
@@ -108,25 +128,11 @@ load_model = False #Whether to load a saved model.
 tau = 0.001 #Rate to update target network toward primary network
 checkpoint = 1000 # Checkpoint to save the model
 
-# The path to save our model to.
-path = "./dqn"
-if not os.path.exists(path):
-    os.makedirs(path)
 
 tf.reset_default_graph()
-mainQN = QNetwork(lr, q_input_size, q_hidden1, q_hidden2, q_hidden3, q_hidden4)
-targetQN = QNetwork(lr, q_input_size, q_hidden1, q_hidden2, q_hidden3, q_hidden4)
+agent = Agent(lr, q_input_size, q_hidden1, q_hidden2, q_hidden3, q_hidden4)
 init = tf.global_variables_initializer()
 saver = tf.train.Saver()
-training_vars = tf.trainable_variables()
-target_ops = updateTargetGraph(training_vars, tau)
-experience_buffer = experienceBuffer()
-
-epsilon = start_epsilon
-step_drop = (start_epsilon - end_epsilon) / annealing_steps
-step_list = []
-reward_list = []
-lifetime_steps = 0
 
 with tf.Session() as sess:
     sess.run(init)
@@ -139,53 +145,53 @@ with tf.Session() as sess:
         episode_buffer = experienceBuffer()
         episode_reward = 0
         s = env.reset()
-        s = qInputShaper(s)
+        s = agent.qInputShaper(s)
         episode_step = 0
 
         while episode_step < max_steps:
             # epsilon greedy policy
-            if np.random.rand(1) < epsilon or lifetime_steps < pre_train_steps:
+            if np.random.rand(1) < agent.epsilon or agent.lifetime_steps < pre_train_steps:
                 a = np.random.randint(0,4)
             else:
-                a = sess.run(mainQN.predict_action, feed_dict={mainQN.input:[s]})
+                a = sess.run(agent.mainQN.predict_action, feed_dict={agent.mainQN.input:[s]})
 
             s1, r, d = env.step(a)
-            s1 = qInputShaper(s1)
-            lifetime_steps += 1
+            s1 = agent.qInputShaper(s1)
+            agent.lifetime_steps += 1
             episode_step += 1
             episode_buffer.add(np.reshape(np.array([s,a,r,s1,d]), [1,5]))
 
-            if lifetime_steps > pre_train_steps:
+            if agent.lifetime_steps > pre_train_steps:
                 # epsilon decay
-                if epsilon > end_epsilon:
-                    epsilon -= step_drop
+                if agent.epsilon > end_epsilon:
+                    agent.epsilon -= agent.step_drop
 
                 # training if every update freq after pre training steps
-                if lifetime_steps % update_freq == 0:
-                    training_batch = experience_buffer.sample(batch_size)
+                if agent.lifetime_steps % update_freq == 0:
+                    training_batch = agent.experience_buffer.sample(batch_size)
                     # Double DQN
-                    estimate_action = sess.run(mainQN.predict_action, feed_dict={mainQN.input:np.vstack(training_batch[:,3])})
-                    target_qs_s1 = sess.run(targetQN.q_values, feed_dict={targetQN.input:np.vstack(training_batch[:,3])})
+                    estimate_action = sess.run(agent.mainQN.predict_action, feed_dict={agent.mainQN.input:np.vstack(training_batch[:,3])})
+                    target_qs_s1 = sess.run(agent.targetQN.q_values, feed_dict={agent.targetQN.input:np.vstack(training_batch[:,3])})
                     target_q_s1 = target_qs_s1[range(batch_size), estimate_action]
                     target_q = training_batch[:,2] + (df * target_q_s1 * (1-training_batch[:,4]))
 
                     # Update main Q Network
-                    _ = sess.run(mainQN.update, feed_dict={mainQN.input:np.vstack(training_batch[:,0]), mainQN.target_q:target_q, mainQN.action:training_batch[:,1]})
+                    _ = sess.run(agent.mainQN.update, feed_dict={agent.mainQN.input:np.vstack(training_batch[:,0]), agent.mainQN.target_q:target_q, agent.mainQN.action:training_batch[:,1]})
                     # Update target Q Network
-                    updateTarget(sess, target_ops)
+                    agent.updateTarget(sess, agent.target_ops)
             episode_reward += r
             s = s1
             if d == True:
                 break
-        experience_buffer.add(episode_buffer.buffer)
-        step_list.append(episode_step)
-        reward_list.append(episode_reward)
+        agent.experience_buffer.add(episode_buffer.buffer)
+        agent.step_list.append(episode_step)
+        agent.reward_list.append(episode_reward)
 
         # Checkpoint for the model
         if episode % checkpoint == 0:
             saver.save(sess, path + '/model-' + str(episode) + '.ckpt')
             print("Saved Model at episode", episode)
-        if len(reward_list) % 10 == 0:
-            print("LifeTime Steps:", lifetime_steps, "Mean Reward of last 10 episodes:", np.mean(reward_list[-10:]), "Epsilon:", epsilon)
+        if len(agent.reward_list) % 10 == 0:
+            print("LifeTime Steps:", agent.lifetime_steps, "Mean Reward of last 10 episodes:", np.mean(agent.reward_list[-10:]), "Epsilon:", agent.epsilon)
     saver.save(sess, path + '/model-' + str(episode) + '.ckpt')
-print("Percent of succesful episodes:", sum(reward_list) / episodes, "%")
+print("Percent of succesful episodes:", sum(agent.reward_list) / episodes, "%")
